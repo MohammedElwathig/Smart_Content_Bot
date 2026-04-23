@@ -4,10 +4,6 @@ Smart Content Bot - Main Entry Point
 
 This module serves as the composition root, wiring all services together,
 starting background tasks, and managing graceful shutdown.
-
-It follows the Dependency Injection principle: all service instances are
-created here and explicitly passed to their consumers, making dependencies
-clear and testable.
 """
 
 import asyncio
@@ -36,17 +32,7 @@ logger = get_logger(__name__)
 
 
 async def main() -> None:
-    """
-    Orchestrate application startup, runtime, and graceful shutdown.
-
-    This function:
-    1. Validates configuration and language settings.
-    2. Instantiates all service classes with explicit dependencies.
-    3. Registers Telegram command handlers.
-    4. Starts background services (health server, scheduler, Telegram polling).
-    5. Waits for termination signal (SIGINT/SIGTERM).
-    6. Performs graceful shutdown of all services.
-    """
+    """Orchestrate application startup, runtime, and graceful shutdown."""
     logger.info("=" * 50)
     logger.info("Smart Content Bot Starting...")
     logger.info(f"Environment: {settings.environment}")
@@ -72,25 +58,24 @@ async def main() -> None:
     logger.info(f"Loaded {len(languages)} language(s): {', '.join([l.code for l in languages])}")
 
     # -------------------------------------------------------------------------
-    # Instantiate services in dependency order (from low-level to high-level)
+    # Instantiate services in dependency order
     # -------------------------------------------------------------------------
 
-    # 1. Key Manager (lowest level - manages API keys)
+    # 1. Key Manager
     try:
         key_manager = GeminiKeyManager(settings.gemini_api_keys)
         logger.info(
-            f"GeminiKeyManager initialized: {key_manager.active_key_count_sync}/"
-            f"{len(settings.gemini_api_keys)} keys active"
+            f"GeminiKeyManager initialized: {key_manager.active_key_count_sync}/{len(settings.gemini_api_keys)} keys active"
         )
     except Exception as e:
         logger.critical(f"Failed to initialize GeminiKeyManager: {e}")
         sys.exit(1)
 
-    # 2. Gemini Client (depends on KeyManager)
+    # 2. Gemini Client
     gemini_client = GeminiClient(key_manager)
     logger.info("GeminiClient initialized")
 
-    # 3. CSV Manager (independent)
+    # 3. CSV Manager
     try:
         csv_manager = CSVManager()
         logger.info("CSVManager initialized")
@@ -98,11 +83,11 @@ async def main() -> None:
         logger.critical(f"Failed to initialize CSVManager: {e}")
         sys.exit(1)
 
-    # 4. Topic Generator (depends on GeminiClient and CSVManager)
+    # 4. Topic Generator
     topic_generator = TopicGenerator(gemini_client, csv_manager)
     logger.info("TopicGenerator initialized")
 
-    # 5. Image Generator (independent)
+    # 5. Image Generator
     try:
         image_generator = ImageGenerator()
         logger.info("ImageGenerator initialized")
@@ -110,19 +95,19 @@ async def main() -> None:
         logger.critical(f"Failed to initialize ImageGenerator: {e}")
         sys.exit(1)
 
-    # 6. TTS Service (independent)
+    # 6. TTS Service
     tts_service = EdgeTTSService()
     logger.info("EdgeTTSService initialized")
 
-    # 7. Telegram Bot (independent)
+    # 7. Telegram Bot (do not access bot.username before initialize)
     try:
         telegram_bot = TelegramBot(settings.telegram_bot_token)
-        logger.info(f"TelegramBot initialized for @{telegram_bot.bot.username}")
+        logger.info("TelegramBot initialized")
     except Exception as e:
         logger.critical(f"Failed to initialize TelegramBot: {e}")
         sys.exit(1)
 
-    # 8. Job Scheduler (composes all publishing services)
+    # 8. Job Scheduler
     job_scheduler = JobScheduler(
         topic_gen=topic_generator,
         image_gen=image_generator,
@@ -133,7 +118,7 @@ async def main() -> None:
     )
     logger.info(f"JobScheduler initialized (interval: {settings.publish_interval_minutes} min)")
 
-    # 9. Health Server (for Render deployment)
+    # 9. Health Server
     health_server = HealthServer(port=settings.port)
     logger.info(f"HealthServer initialized on port {settings.port}")
 
@@ -167,7 +152,6 @@ async def main() -> None:
 
     except Exception as e:
         logger.critical(f"Failed to start services: {e}")
-        # Attempt cleanup before exit
         await cleanup_services(health_server, job_scheduler, telegram_bot)
         sys.exit(1)
 
@@ -205,13 +189,7 @@ async def cleanup_services(
 ) -> None:
     """
     Attempt to gracefully stop all services, logging any errors.
-
-    Args:
-        health_server: HealthServer instance.
-        job_scheduler: JobScheduler instance.
-        telegram_bot: TelegramBot instance.
     """
-    # Stop Telegram bot first (stop receiving new updates)
     try:
         if telegram_bot.application.updater:
             await telegram_bot.application.updater.stop()
@@ -221,14 +199,12 @@ async def cleanup_services(
     except Exception as e:
         logger.error(f"Error stopping Telegram bot: {e}")
 
-    # Stop scheduler (prevent new publications mid-shutdown)
     try:
         await job_scheduler.stop()
         logger.info("Job scheduler stopped")
     except Exception as e:
         logger.error(f"Error stopping job scheduler: {e}")
 
-    # Stop health server last
     try:
         await health_server.stop()
         logger.info("Health server stopped")
