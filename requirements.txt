@@ -1,0 +1,24 @@
+# Core Telegram Bot Framework
+python-telegram-bot==21.3
+
+# AI & Generative Models
+google-generativeai==0.7.2
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# Scheduling
+apscheduler==3.10.4
+
+# Text-to-Speech (Free Edge TTS)
+edge-tts==6.1.14
+
+# Image Processing
+Pillow==10.3.0
+arabic-reshaper==3.0.0
+python-bidi==0.4.2
+
+# Web Server for Health Checks
+aiohttp==3.9.5
+
+# Utilities
+python-dotenv==1.0.1

@@ -1,0 +1,36 @@
+# Render Blueprint configuration
+# See: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: smart-content-bot
+    runtime: python
+    region: oregon  # You can change this to your preferred region
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /ping
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: ADMIN_USER_IDS
+        sync: false
+      - key: AUDIO_RATIO_DENOMINATOR
+        value: 4
+      - key: TTS_RATE
+        value: "+0%"
+      - key: TTS_PITCH
+        value: "+0Hz"
+      - key: PUBLISH_INTERVAL_MINUTES
+        value: 60
+      - key: LOG_LEVEL
+        value: INFO
+      - key: ENVIRONMENT
+        value: production
+      - key: PORT
+        value: 10000
