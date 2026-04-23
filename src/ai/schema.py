@@ -62,7 +62,7 @@ class TopicResponse(BaseModel):
             f'"{self.quote_text}"',
         ]
         if self.quote_author:
-            parts.append(f"¡ª {self.quote_author}")
+            parts.append(f"-- {self.quote_author}")
         return "\n".join(parts)
 
     def to_telegram_html(self, max_length: Optional[int] = None) -> str:
@@ -88,9 +88,9 @@ class TopicResponse(BaseModel):
         body_paragraphs = [f"<p>{html.escape(p)}</p>" for p in self.body]
         body_html = "\n\n".join(body_paragraphs)
 
-        quote_html = f"<i>¡°{quote_text}¡±</i>"
+        quote_html = f'<i>"{quote_text}"</i>'
         if quote_author:
-            quote_html += f" ¡ª <b>{quote_author}</b>"
+            quote_html += f" -- <b>{quote_author}</b>"
 
         html_content = f"""
 <b>{title}</b>
@@ -116,7 +116,7 @@ class TopicResponse(BaseModel):
             )
             if last_space > max_length // 2:  # Only if we keep enough content
                 truncated = truncated[:last_space]
-            html_content = truncated + "¡­"
+            html_content = truncated + "..."
 
         return html_content
 
