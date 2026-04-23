@@ -36,7 +36,7 @@ class TelegramBot:
         self.token = token or settings.telegram_bot_token
         self.logger = logger
 
-        # Build application with sensible timeouts
+        # Build application without accessing bot
         self.app: Application = (
             ApplicationBuilder()
             .token(self.token)
@@ -45,9 +45,17 @@ class TelegramBot:
             .write_timeout(30)
             .build()
         )
-        self.bot: Bot = self.app.bot
+        # Do NOT access self.app.bot here.
+        self._bot: Optional[Bot] = None
 
-        self.logger.info(f"TelegramBot initialized for @{self.bot.username}")
+        self.logger.info("TelegramBot initialized")
+
+    @property
+    def bot(self) -> Bot:
+        """Lazy accessor for the Bot instance."""
+        if self._bot is None:
+            self._bot = self.app.bot
+        return self._bot
 
     @property
     def application(self) -> Application:
@@ -61,24 +69,7 @@ class TelegramBot:
         max_retries: int = 3,
         **kwargs,
     ) -> Any:
-        """
-        Retry a Telegram API call with exponential backoff on network issues.
-
-        Uses the general `retry_async` helper, catching only Telegram-specific
-        retryable exceptions.
-
-        Args:
-            func: Async callable to execute.
-            max_retries: Maximum number of attempts.
-            *args, **kwargs: Arguments passed to func.
-
-        Returns:
-            Result of func.
-
-        Raises:
-            TelegramError: For non-retryable Telegram errors.
-            Exception: After all retries exhausted.
-        """
+        """Retry a Telegram API call with exponential backoff on network issues."""
         return await retry_async(
             func,
             *args,
@@ -96,18 +87,7 @@ class TelegramBot:
         parse_mode: str = "HTML",
         disable_web_page_preview: bool = True,
     ) -> bool:
-        """
-        Send a text message to a chat.
-
-        Args:
-            chat_id: Telegram chat/channel ID.
-            text: Message text (HTML formatted by default).
-            parse_mode: 'HTML' or 'MarkdownV2'.
-            disable_web_page_preview: Disable link previews.
-
-        Returns:
-            True if sent successfully, False otherwise.
-        """
+        """Send a text message to a chat. Returns True if successful."""
         try:
             await self._retry_telegram(
                 self.bot.send_message,
@@ -133,19 +113,7 @@ class TelegramBot:
         parse_mode: str = "HTML",
         delete_after: bool = True,
     ) -> bool:
-        """
-        Send a photo to a chat.
-
-        Args:
-            chat_id: Telegram chat ID.
-            photo_path: Path to the image file.
-            caption: Optional caption text.
-            parse_mode: Parse mode for caption.
-            delete_after: Whether to delete the local file after sending.
-
-        Returns:
-            True if sent successfully, False otherwise.
-        """
+        """Send a photo to a chat. Returns True if successful."""
         if not os.path.exists(photo_path):
             self.logger.error(f"Photo file not found: {photo_path}")
             return False
@@ -180,20 +148,7 @@ class TelegramBot:
         duration: Optional[int] = None,
         delete_after: bool = True,
     ) -> bool:
-        """
-        Send an audio file (MP3) to a chat.
-
-        Args:
-            chat_id: Telegram chat ID.
-            audio_path: Path to the audio file.
-            title: Audio title.
-            performer: Performer name.
-            duration: Duration in seconds (optional).
-            delete_after: Whether to delete the local file after sending.
-
-        Returns:
-            True if sent successfully, False otherwise.
-        """
+        """Send an audio file (MP3) to a chat. Returns True if successful."""
         if not os.path.exists(audio_path):
             self.logger.error(f"Audio file not found: {audio_path}")
             return False
@@ -230,18 +185,7 @@ class TelegramBot:
     ) -> Dict[str, bool]:
         """
         Send a complete topic package: text, article image, quote image, and optional audio.
-
-        This method tolerates missing images/audio gracefully by skipping them.
-
-        Args:
-            chat_id: Telegram channel ID.
-            topic_text: Full article text (HTML formatted).
-            article_image_path: Path to article image (optional).
-            quote_image_path: Path to quote image (optional).
-            audio_path: Optional path to podcast audio file.
-
-        Returns:
-            Dictionary with success status for each component.
+        Returns a dictionary indicating success of each component.
         """
         results = {
             "text": False,
@@ -250,10 +194,8 @@ class TelegramBot:
             "audio": False,
         }
 
-        # 1. Send text (required)
         results["text"] = await self.send_text(chat_id, topic_text)
 
-        # 2. Send article image (optional)
         if article_image_path:
             results["article_image"] = await self.send_photo(
                 chat_id, article_image_path, delete_after=True
@@ -261,7 +203,6 @@ class TelegramBot:
         else:
             results["article_image"] = True  # skipped successfully
 
-        # 3. Send quote image (optional)
         if quote_image_path:
             results["quote_image"] = await self.send_photo(
                 chat_id, quote_image_path, delete_after=True
@@ -269,7 +210,6 @@ class TelegramBot:
         else:
             results["quote_image"] = True
 
-        # 4. Send audio (optional)
         if audio_path:
             results["audio"] = await self.send_audio(
                 chat_id, audio_path, delete_after=True
@@ -283,9 +223,7 @@ class TelegramBot:
         return results
 
     async def stop(self) -> None:
-        """
-        Gracefully stop the bot and release resources.
-        """
+        """Gracefully stop the bot and release resources."""
         self.logger.info("Stopping Telegram bot...")
         try:
             await self.app.stop()
