@@ -3,21 +3,35 @@ Topic generation orchestrator with daily caching and duplicate prevention.
 
 Manages the daily topics cache per language, consumes topics for scheduled
 publications, and coordinates with GeminiClient for full content generation.
+
+Now fully robust: all Gemini API calls are routed through the client's
+retry/timeout infrastructure, eliminating any chance of indefinite hanging.
 """
 
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 from src.ai.gemini_client import GeminiClient, GeminiClientError
 from src.ai.schema import PodcastScript, TopicResponse
 from src.storage.csv_manager import CSVManager
-from src.utils.helpers import ensure_directory, utc_now_iso
+from src.utils.helpers import ensure_directory
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Simple schema for the daily topic list response
+# ---------------------------------------------------------------------------
+class TopicListResponse(BaseModel):
+    topics: List[str] = Field(
+        ..., min_length=1, description="List of topic titles"
+    )
 
 
 class TopicGenerator:
@@ -30,9 +44,10 @@ class TopicGenerator:
     - FIFO topic consumption.
     - Duplicate avoidance using recent publication history.
     - Async-safe cache operations.
+    - Fallback topic list if Gemini generation fails entirely.
     """
 
-    # Prompt for generating a list of topic titles
+    # Prompt for generating a list of topic titles (now returning an object)
     TOPIC_LIST_PROMPT_TEMPLATE = """
 You are a creative content strategist. Generate a list of {count} unique, engaging, and diverse topic titles in {language} suitable for short informative articles or blog posts.
 
@@ -40,13 +55,89 @@ Requirements:
 - Each title should be a single line, no longer than 15 words.
 - Topics should be interesting to a general audience.
 - Avoid overly technical or niche subjects.
-- Output must be a valid JSON array of strings.
+- Output must be a valid JSON object with a single key "topics" containing an array of strings.
 
 {avoid_instruction}
 
-Return ONLY the JSON array, nothing else.
-Example: ["Title 1", "Title 2", "Title 3"]
+Return ONLY the JSON object, nothing else.
+Example: {{"topics": ["Title 1", "Title 2", "Title 3"]}}
 """.strip()
+
+    # Fallback generic topics in case Gemini generation fails repeatedly
+    FALLBACK_TOPICS: Dict[str, List[str]] = {
+        "ar": [
+            "التكنولوجيا في حياتنا اليومية",
+            "نصائح لتحسين الإنتاجية",
+            "أهمية الصحة النفسية",
+            "كيف تبدأ مشروعك الخاص",
+            "ألغاز علمية مثيرة",
+            "التسويق عبر وسائل التواصل",
+            "العملات الرقمية: فرص ومخاطر",
+            "أفضل الكتب للقراءة هذا الشهر",
+            "فن إدارة الوقت",
+            "الذكاء الاصطناعي: بين الخيال والواقع",
+        ],
+        "en": [
+            "Technology in our daily lives",
+            "Tips to boost productivity",
+            "The importance of mental health",
+            "How to start your own business",
+            "Fascinating science puzzles",
+            "Social media marketing",
+            "Cryptocurrency: opportunities and risks",
+            "Best books to read this month",
+            "Time management skills",
+            "AI: between fiction and reality",
+        ],
+        "fr": [
+            "La technologie au quotidien",
+            "Astuces pour booster sa productivité",
+            "L'importance de la santé mentale",
+            "Comment lancer son entreprise",
+            "Énigmes scientifiques fascinantes",
+            "Le marketing sur les réseaux sociaux",
+            "Cryptomonnaies : opportunités et risques",
+            "Les meilleurs livres à lire ce mois-ci",
+            "L'art de gérer son temps",
+            "L'IA entre fiction et réalité",
+        ],
+        "ru": [
+            "Технологии в повседневной жизни",
+            "Советы по повышению продуктивности",
+            "Важность психического здоровья",
+            "Как начать свой бизнес",
+            "Увлекательные научные загадки",
+            "Маркетинг в социальных сетях",
+            "Криптовалюта: возможности и риски",
+            "Лучшие книги для чтения в этом месяце",
+            "Тайм-менеджмент",
+            "ИИ: между вымыслом и реальностью",
+        ],
+        "es": [
+            "La tecnología en nuestra vida diaria",
+            "Consejos para mejorar la productividad",
+            "La importancia de la salud mental",
+            "Cómo iniciar tu propio negocio",
+            "Fascinantes enigmas científicos",
+            "Marketing en redes sociales",
+            "Criptomonedas: oportunidades y riesgos",
+            "Los mejores libros para leer este mes",
+            "Gestión del tiempo",
+            "IA entre ficción y realidad",
+        ],
+        "pt": [
+            "Tecnologia no nosso dia a dia",
+            "Dicas para aumentar a produtividade",
+            "A importância da saúde mental",
+            "Como começar o seu próprio negócio",
+            "Enigmas científicos fascinantes",
+            "Marketing nas redes sociais",
+            "Criptomoedas: oportunidades e riscos",
+            "Melhores livros para ler este mês",
+            "Gestão do tempo",
+            "IA entre ficção e realidade",
+        ],
+    }
 
     def __init__(
         self,
@@ -77,18 +168,19 @@ Example: ["Title 1", "Title 2", "Title 3"]
         if cache_dir:
             ensure_directory(cache_dir)
 
-        self._load_cache()
+        # Load existing cache synchronously during init (safe)
+        self._load_cache_sync()
         logger.info(
             f"TopicGenerator initialized: {len(self._cache)} language(s), "
             f"{topics_per_day} topics/day"
         )
 
     # -------------------------------------------------------------------------
-    # Private Cache Helpers
+    # Cache I/O Helpers (synchronous and asynchronous)
     # -------------------------------------------------------------------------
 
-    def _load_cache(self) -> None:
-        """Load cache from JSON file; create empty on failure."""
+    def _load_cache_sync(self) -> None:
+        """Load cache from JSON file (blocking, used only at init)."""
         try:
             with open(self.cache_file, "r", encoding="utf-8") as f:
                 self._cache = json.load(f)
@@ -100,63 +192,67 @@ Example: ["Title 1", "Title 2", "Title 3"]
             logger.warning(f"Corrupted cache file: {e}, starting fresh")
             self._cache = {}
 
-    async def _save_cache(self) -> None:
-        """Persist cache to JSON file (caller must hold lock)."""
+    async def _load_cache(self) -> None:
+        """Async wrapper that offloads file I/O to a thread."""
+        await asyncio.to_thread(self._load_cache_sync)
+
+    def _save_cache_sync(self) -> None:
+        """Write the cache to disk (blocking). Caller must hold lock."""
         try:
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 json.dump(self._cache, f, indent=2, ensure_ascii=False)
             logger.debug(f"Saved cache with {len(self._cache)} language(s)")
         except OSError as e:
-            logger.error(f"Failed to save cache: {e}")
+            logger.error(f"Failed to persist cache: {e}")
+
+    async def _save_cache(self) -> None:
+        """Async wrapper for saving cache."""
+        await asyncio.to_thread(self._save_cache_sync)
+
+    # -------------------------------------------------------------------------
+    # Validation and Date Helpers
+    # -------------------------------------------------------------------------
 
     def _is_cache_valid(self, language: str) -> bool:
-        """
-        Check if cache for a language is valid (today's date, non-empty topics).
-        """
+        """Check if the cache for a language is fresh (today) and non-empty."""
         if language not in self._cache:
             return False
         entry = self._cache[language]
-        today = datetime.utcnow().date().isoformat()
+        today = self._get_today_iso()
         return entry.get("date") == today and bool(entry.get("topics"))
 
     def _get_today_iso(self) -> str:
         """Return today's date in YYYY-MM-DD format (UTC)."""
-        return datetime.utcnow().date().isoformat()
+        return datetime.now(timezone.utc).date().isoformat()
 
     # -------------------------------------------------------------------------
-    # Daily Topic List Generation
+    # Core Topic List Generation (with full GeminiClient retry & timeout)
     # -------------------------------------------------------------------------
 
     async def _generate_daily_topics(self, language: str) -> List[str]:
         """
-        Call Gemini to generate a fresh list of topic titles for a language.
+        Generate a fresh list of topic titles for a language via Gemini.
+
+        Uses the robust GeminiClient._generate_with_retry so we inherit
+        all timeout and retry logic. Falls back to hardcoded topics if
+        generation fails completely.
 
         Args:
             language: ISO language code.
 
         Returns:
-            List of topic title strings.
-
-        Raises:
-            GeminiClientError: If generation fails after retries.
+            List of unique topic title strings (never empty if fallback works).
         """
-        # Get language name for prompt
-        language_name = {"ar": "Arabic", "en": "English", "fr": "French"}.get(
-            language, language.upper()
-        )
+        language_name = self.gemini_client._get_language_name(language)
 
         # Fetch recent titles for duplicate avoidance
-        recent_titles = await self.csv_manager.get_recent_titles(
-            language, limit=20
-        )
+        recent_titles = await self.csv_manager.get_recent_titles(language, limit=20)
         avoid_instruction = ""
         if recent_titles:
             titles_str = "\n".join(f"- {t}" for t in recent_titles[:10])
             avoid_instruction = (
                 f"Avoid these recently published topics:\n{titles_str}\n"
             )
-        else:
-            avoid_instruction = ""
 
         prompt = self.TOPIC_LIST_PROMPT_TEMPLATE.format(
             count=self.topics_per_day,
@@ -166,43 +262,42 @@ Example: ["Title 1", "Title 2", "Title 3"]
 
         logger.info(f"Generating {self.topics_per_day} topics for '{language}'")
         try:
-            # Use a simpler call without full schema; we just need a list
-            import google.generativeai as genai
-            from google.generativeai.types import GenerationConfig
-
-            api_key = self.gemini_client.key_manager.get_next_key()
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(self.gemini_client.model_name)
-
-            response = await model.generate_content_async(
-                prompt,
-                generation_config=GenerationConfig(
-                    response_mime_type="application/json",
-                    temperature=0.9,  # More creative for topics
-                ),
+            # Use the client's robust retry infrastructure
+            response = await self.gemini_client._generate_with_retry(
+                prompt, TopicListResponse
             )
-            # Parse JSON list
-            topics = json.loads(response.text)
-            if isinstance(topics, list) and all(isinstance(t, str) for t in topics):
-                # Ensure uniqueness
-                topics = list(dict.fromkeys(topics))
-                logger.info(f"Generated {len(topics)} topics for '{language}'")
-                return topics[: self.topics_per_day]
-            else:
-                logger.error(f"Invalid topic list format: {response.text[:200]}")
-                raise GeminiClientError("Topic list response not a JSON array of strings")
+            topics = response.topics
+
+            # Remove duplicates while preserving order
+            unique_topics = list(dict.fromkeys(topics))
+            # Take only the requested amount
+            unique_topics = unique_topics[: self.topics_per_day]
+
+            if not unique_topics:
+                raise ValueError("Gemini returned an empty topic list")
+
+            logger.info(f"Generated {len(unique_topics)} topics for '{language}'")
+            return unique_topics
 
         except Exception as e:
-            logger.error(f"Failed to generate daily topics for '{language}': {e}")
-            raise GeminiClientError(f"Daily topic generation failed: {e}") from e
+            logger.error(f"Failed to generate topics for '{language}': {e}")
+            # Use fallback topics if available
+            fallback = self.FALLBACK_TOPICS.get(language)
+            if fallback:
+                logger.warning(f"Using {len(fallback)} fallback topics for '{language}'")
+                return fallback[: self.topics_per_day]
+            # If no fallback for this language, re-raise
+            raise GeminiClientError(
+                f"Daily topic generation failed for '{language}' and no fallback available."
+            ) from e
 
     # -------------------------------------------------------------------------
-    # Public Methods
+    # Public API
     # -------------------------------------------------------------------------
 
     async def ensure_cache_ready(self, language: str) -> None:
         """
-        Ensure a valid daily cache exists for the given language.
+        Ensure a valid daily cache exists for the language.
         Regenerates if missing or stale.
         """
         async with self._lock:
@@ -217,29 +312,24 @@ Example: ["Title 1", "Title 2", "Title 3"]
                     "topics": topics,
                 }
                 await self._save_cache()
-            except Exception as e:
-                logger.error(f"Cache regeneration failed for '{language}': {e}")
-                raise
+            except Exception:
+                # If complete failure, try to keep existing cache (if any) rather than none
+                if language in self._cache and self._cache[language].get("topics"):
+                    logger.warning(f"Keeping stale cache for '{language}' due to regeneration failure.")
+                else:
+                    raise
 
     async def get_next_topic(self, language: str) -> str:
         """
-        Retrieve and consume the next topic title for the language.
+        Retrieve and consume the next topic title.
 
-        Args:
-            language: ISO language code.
-
-        Returns:
-            Topic title string.
-
-        Raises:
-            ValueError: If cache is empty after ensuring readiness.
+        Raises ValueError if no topics are available after ensuring cache is ready.
         """
         await self.ensure_cache_ready(language)
 
         async with self._lock:
             entry = self._cache.get(language)
             if not entry or not entry.get("topics"):
-                # This should not happen after ensure_cache_ready
                 raise ValueError(f"No topics available for '{language}'")
 
             topic = entry["topics"].pop(0)
@@ -247,45 +337,16 @@ Example: ["Title 1", "Title 2", "Title 3"]
             logger.info(f"Consumed topic for '{language}': {topic[:50]}...")
             return topic
 
-    async def generate_full_topic(
-        self, language: str, topic_title: str
-    ) -> TopicResponse:
-        """
-        Generate a complete article and quote for the given topic.
-
-        Args:
-            language: ISO language code.
-            topic_title: The specific topic title.
-
-        Returns:
-            Validated TopicResponse object.
-        """
-        logger.info(f"Generating full topic for '{language}': {topic_title[:50]}...")
+    async def generate_full_topic(self, language: str, topic_title: str) -> TopicResponse:
+        """Generate a full article."""
         return await self.gemini_client.generate_topic(language, topic_title)
 
-    async def generate_podcast_script(
-        self, language: str, topic_title: str
-    ) -> PodcastScript:
-        """
-        Generate a podcast script for the given topic.
-
-        Args:
-            language: ISO language code.
-            topic_title: The topic title.
-
-        Returns:
-            Validated PodcastScript object.
-        """
-        logger.info(f"Generating podcast script for '{language}': {topic_title[:50]}...")
+    async def generate_podcast_script(self, language: str, topic_title: str) -> PodcastScript:
+        """Generate a podcast script."""
         return await self.gemini_client.generate_podcast_script(language, topic_title)
 
     def get_cache_status(self) -> Dict[str, Any]:
-        """
-        Return a summary of the current cache status.
-
-        Returns:
-            Dictionary with per-language date and remaining topics count.
-        """
+        """Return cache status snapshot."""
         status = {}
         for lang, entry in self._cache.items():
             status[lang] = {
@@ -297,10 +358,7 @@ Example: ["Title 1", "Title 2", "Title 3"]
 
     async def regenerate_cache(self, language: Optional[str] = None) -> None:
         """
-        Force regeneration of the daily topic cache.
-
-        Args:
-            language: Specific language to regenerate. If None, regenerates all.
+        Force regeneration of the daily topic cache for one or all languages.
         """
         from src.storage.languages import get_language_codes
 
