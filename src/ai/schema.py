@@ -3,23 +3,13 @@ Pydantic schemas for Gemini API structured responses.
 
 Defines the expected JSON structures for topic articles and podcast scripts,
 ensuring runtime validation and type safety.
-
-Enhanced with:
-- Telegram-specific output formatting with automatic chunking.
-- Truncation logic to safely fit content within platform limits.
-- Robust validation and normalization of all fields.
 """
 
 import html
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
-from pydantic import BaseModel, field_validator, model_validator
-
-# Telegram imposes a 4096 character limit on messages
-TELEGRAM_MAX_MESSAGE_LENGTH = 4096
-# Safe threshold slightly below the limit to account for HTML overhead
-TELEGRAM_SAFE_LENGTH = 4000
+from pydantic import BaseModel, Field, field_validator
 
 
 class TopicResponse(BaseModel):
@@ -30,55 +20,28 @@ class TopicResponse(BaseModel):
     paragraphs, conclusion, and a separate quote.
     """
 
-    title: str = Field(..., min_length=1, max_length=300, description="The main title of the topic/article")
+    title: str = Field(..., min_length=1, description="The main title of the topic/article")
     introduction: str = Field(
-        ..., min_length=1, max_length=1000, description="An engaging opening paragraph (2-4 sentences)"
+        ..., min_length=1, description="An engaging opening paragraph (2-4 sentences)"
     )
     body: List[str] = Field(
-        ..., min_length=1, max_length=10, description="Main content paragraphs, typically 3-5 paragraphs"
+        ..., min_length=1, description="Main content paragraphs, typically 3-5 paragraphs"
     )
     conclusion: str = Field(
-        ..., min_length=1, max_length=1000, description="A closing paragraph summarizing the key message"
+        ..., min_length=1, description="A closing paragraph summarizing the key message"
     )
-    quote_text: str = Field(..., min_length=1, max_length=1000, description="An inspiring or relevant quote")
+    quote_text: str = Field(..., min_length=1, description="An inspiring or relevant quote")
     quote_author: Optional[str] = Field(
-        None, max_length=200, description="Author of the quote, if known or attributable"
+        None, description="Author of the quote, if known or attributable"
     )
-
-    # -------------------------------------------------------------------------
-    # Validators
-    # -------------------------------------------------------------------------
 
     @field_validator("quote_author", mode="before")
     @classmethod
-    def normalize_quote_author(cls, v: object) -> Optional[str]:
-        """Convert empty strings or whitespace-only to None."""
+    def normalize_quote_author(cls, v: str) -> Optional[str]:
+        """Convert empty strings to None."""
         if isinstance(v, str) and not v.strip():
             return None
-        return v  # type: ignore
-
-    @field_validator("body")
-    @classmethod
-    def validate_body_paragraphs(cls, v: List[str]) -> List[str]:
-        """Remove empty paragraphs and strip whitespace."""
-        cleaned = [p.strip() for p in v if p and p.strip()]
-        if not cleaned:
-            raise ValueError("body must contain at least one non-empty paragraph")
-        return cleaned
-
-    @field_validator("title", "introduction", "conclusion", "quote_text", mode="after")
-    @classmethod
-    def strip_and_truncate(cls, v: str) -> str:
-        """Strip whitespace and truncate overly long strings gracefully."""
-        if isinstance(v, str):
-            v = v.strip()
-            # Truncate with ellipsis if exceeding max length for the field
-            # (max_length is already enforced by Field, but this is a safety net)
         return v
-
-    # -------------------------------------------------------------------------
-    # Output formatters
-    # -------------------------------------------------------------------------
 
     def to_full_text(self) -> str:
         """
@@ -87,7 +50,7 @@ class TopicResponse(BaseModel):
         Returns:
             Formatted text suitable for display or logging.
         """
-        parts: List[str] = [
+        parts = [
             self.title,
             "",
             self.introduction,
@@ -102,81 +65,34 @@ class TopicResponse(BaseModel):
             parts.append(f"-- {self.quote_author}")
         return "\n".join(parts)
 
-    def to_telegram_html(self) -> str:
+    def to_telegram_html(self, max_length: Optional[int] = None) -> str:
         """
-        Format the topic as HTML for a single Telegram message.
-
-        If the output exceeds the safe length, it is truncated gracefully
-        at a word boundary. For full-length articles, use split_for_telegram().
-
-        Returns:
-            HTML string with bold title, italic quote, etc. Safe for Telegram.
-        """
-        html_content = self._build_html()
-        return self._truncate_html(html_content, TELEGRAM_SAFE_LENGTH)
-
-    def split_for_telegram(self, max_length: int = TELEGRAM_SAFE_LENGTH) -> List[str]:
-        """
-        Split the topic into multiple Telegram-safe HTML chunks.
-
-        Attempts to split at paragraph boundaries first, then sentence
-        boundaries, and finally at word boundaries if necessary.
+        Format the topic as HTML for Telegram messages.
 
         Args:
-            max_length: Maximum length of each chunk (default 4000).
+            max_length: Optional maximum length of the output. If exceeded,
+                        the text is truncated gracefully at word boundaries.
 
         Returns:
-            List of HTML strings, each safe for a single Telegram message.
+            HTML string with bold title, italic quote, etc. Special HTML
+            characters in the content are automatically escaped.
         """
-        full_html = self._build_html()
-        if len(full_html) <= max_length:
-            return [full_html]
-
-        chunks: List[str] = []
-        # Split the HTML into sections based on <p> tags
-        sections = re.split(r'(<p>.*?</p>)', full_html, flags=re.DOTALL)
-        current_chunk = ""
-
-        for section in sections:
-            if not section.strip():
-                continue
-            if len(current_chunk) + len(section) <= max_length:
-                current_chunk += section
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                # If the section itself is too long, split it further
-                if len(section) > max_length:
-                    sub_chunks = self._split_long_section(section, max_length)
-                    chunks.extend(sub_chunks)
-                else:
-                    current_chunk = section
-
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-
-        return chunks if chunks else [self._truncate_html(full_html, max_length)]
-
-    # -------------------------------------------------------------------------
-    # Private helpers
-    # -------------------------------------------------------------------------
-
-    def _build_html(self) -> str:
-        """Build the full HTML representation without truncation."""
+        # Escape all user-provided text to prevent HTML injection
         title = html.escape(self.title)
         intro = html.escape(self.introduction)
         conclusion = html.escape(self.conclusion)
         quote_text = html.escape(self.quote_text)
         quote_author = html.escape(self.quote_author) if self.quote_author else None
 
+        # Escape each body paragraph and wrap in <p> tags
         body_paragraphs = [f"<p>{html.escape(p)}</p>" for p in self.body]
         body_html = "\n\n".join(body_paragraphs)
 
         quote_html = f'<i>"{quote_text}"</i>'
         if quote_author:
-            quote_html += f" — <b>{quote_author}</b>"
+            quote_html += f" -- <b>{quote_author}</b>"
 
-        return f"""
+        html_content = f"""
 <b>{title}</b>
 
 {intro}
@@ -188,45 +104,21 @@ class TopicResponse(BaseModel):
 {quote_html}
 """.strip()
 
-    @staticmethod
-    def _truncate_html(html_content: str, max_length: int) -> str:
-        """Truncate HTML content at a word boundary near max_length."""
-        if len(html_content) <= max_length:
-            return html_content
+        # Apply truncation if requested
+        if max_length is not None and len(html_content) > max_length:
+            # Truncate at word boundary near the limit
+            truncated = html_content[:max_length]
+            # Try to cut at last space or newline
+            last_space = max(
+                truncated.rfind(" "),
+                truncated.rfind("\n"),
+                truncated.rfind(">"),
+            )
+            if last_space > max_length // 2:  # Only if we keep enough content
+                truncated = truncated[:last_space]
+            html_content = truncated + "..."
 
-        truncated = html_content[:max_length]
-        # Try to cut at the last space, newline, or closing tag
-        last_break = max(
-            truncated.rfind(" "),
-            truncated.rfind("\n"),
-            truncated.rfind(">"),
-        )
-        if last_break > max_length // 2:
-            truncated = truncated[:last_break]
-        return truncated + "…"
-
-    @staticmethod
-    def _split_long_section(section: str, max_length: int) -> List[str]:
-        """Split a single long HTML section into smaller chunks."""
-        chunks = []
-        # Try to split by sentences
-        sentences = re.split(r'(?<=[.!?])\s+', section)
-        current = ""
-        for sent in sentences:
-            if len(current) + len(sent) <= max_length:
-                current += (" " if current else "") + sent
-            else:
-                if current:
-                    chunks.append(current)
-                # If a single sentence is too long, force-split it
-                if len(sent) > max_length:
-                    for i in range(0, len(sent), max_length):
-                        chunks.append(sent[i:i+max_length])
-                else:
-                    current = sent
-        if current:
-            chunks.append(current)
-        return chunks
+        return html_content
 
 
 class PodcastScript(BaseModel):
@@ -237,9 +129,9 @@ class PodcastScript(BaseModel):
     approximately 90-120 seconds when spoken.
     """
 
-    title: str = Field(..., min_length=1, max_length=200, description="Podcast episode title")
+    title: str = Field(..., min_length=1, description="Podcast episode title (can match main topic)")
     intro: str = Field(
-        ..., min_length=1, max_length=500, description="Brief introduction, approximately 20-40 words"
+        ..., min_length=1, description="Brief introduction, approximately 20-40 words"
     )
     segments: List[str] = Field(
         ...,
@@ -248,37 +140,26 @@ class PodcastScript(BaseModel):
         description="2 to 4 key points or paragraphs for the podcast body",
     )
     outro: str = Field(
-        ..., min_length=1, max_length=500, description="Brief conclusion, approximately 20-40 words"
+        ..., min_length=1, description="Brief conclusion, approximately 20-40 words"
     )
-
-    # -------------------------------------------------------------------------
-    # Validators
-    # -------------------------------------------------------------------------
 
     @field_validator("segments")
     @classmethod
     def validate_segments_count(cls, v: List[str]) -> List[str]:
-        """Ensure segments list contains between 2 and 4 items, none empty."""
-        cleaned = [s.strip() for s in v if s and s.strip()]
-        if len(cleaned) < 2:
-            raise ValueError("segments must contain at least 2 non-empty items")
-        if len(cleaned) > 4:
+        """Ensure segments list contains between 2 and 4 items."""
+        if len(v) < 2:
+            raise ValueError("segments must contain at least 2 items")
+        if len(v) > 4:
             raise ValueError("segments must contain at most 4 items")
-        return cleaned
+        return v
 
     @field_validator("intro", "outro", "segments", mode="after")
     @classmethod
-    def strip_whitespace(cls, v: object) -> object:
+    def strip_whitespace(cls, v: str) -> str:
         """Clean extra whitespace from text fields."""
         if isinstance(v, str):
             return v.strip()
-        if isinstance(v, list):
-            return [item.strip() if isinstance(item, str) else item for item in v]
         return v
-
-    # -------------------------------------------------------------------------
-    # Output formatters
-    # -------------------------------------------------------------------------
 
     def to_plain_text(self) -> str:
         """
@@ -306,17 +187,6 @@ class PodcastScript(BaseModel):
             Total number of words across all fields.
         """
         full_text = f"{self.intro} {' '.join(self.segments)} {self.outro}"
+        # Split on whitespace and filter empty strings
         words = re.findall(r"\b\w+\b", full_text)
         return len(words)
-
-    def estimated_duration_seconds(self, words_per_second: float = 2.5) -> float:
-        """
-        Estimate the spoken duration of the script.
-
-        Args:
-            words_per_second: Average speaking rate (default 2.5 words/sec for natural speech).
-
-        Returns:
-            Estimated duration in seconds.
-        """
-        return self.estimated_word_count() / words_per_second
