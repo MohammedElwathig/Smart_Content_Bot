@@ -12,6 +12,7 @@ Enhanced with:
 """
 
 import asyncio
+import json
 import random
 from typing import Dict, Optional, Type, TypeVar
 
@@ -213,7 +214,7 @@ Important guidelines:
             return "bad_request"
 
         # Parsing / validation
-        if isinstance(error, (ValidationError, json.JSONDecodeError)):  # Note: json is imported below
+        if isinstance(error, (ValidationError, json.JSONDecodeError)):
             return "parse_error"
 
         return "unknown"
@@ -282,8 +283,6 @@ Important guidelines:
             AllKeysExhaustedError: If no keys remain.
             GeminiClientError: After all retries are exhausted.
         """
-        import json  # Local import for JSON decode error
-
         # Determine max retries
         if max_retries is None:
             status = await self.key_manager.get_status()

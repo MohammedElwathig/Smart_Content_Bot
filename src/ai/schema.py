@@ -20,17 +20,17 @@ class TopicResponse(BaseModel):
     paragraphs, conclusion, and a separate quote.
     """
 
-    title: str = Field(..., min_length=1, description="The main title of the topic/article")
+    title: str = Field(..., description="The main title of the topic/article")
     introduction: str = Field(
-        ..., min_length=1, description="An engaging opening paragraph (2-4 sentences)"
+        ..., description="An engaging opening paragraph (2-4 sentences)"
     )
     body: List[str] = Field(
-        ..., min_length=1, description="Main content paragraphs, typically 3-5 paragraphs"
+        ..., description="Main content paragraphs, typically 3-5 paragraphs"
     )
     conclusion: str = Field(
-        ..., min_length=1, description="A closing paragraph summarizing the key message"
+        ..., description="A closing paragraph summarizing the key message"
     )
-    quote_text: str = Field(..., min_length=1, description="An inspiring or relevant quote")
+    quote_text: str = Field(..., description="An inspiring or relevant quote")
     quote_author: Optional[str] = Field(
         None, description="Author of the quote, if known or attributable"
     )
@@ -129,9 +129,9 @@ class PodcastScript(BaseModel):
     approximately 90-120 seconds when spoken.
     """
 
-    title: str = Field(..., min_length=1, description="Podcast episode title (can match main topic)")
+    title: str = Field(..., description="Podcast episode title (can match main topic)")
     intro: str = Field(
-        ..., min_length=1, description="Brief introduction, approximately 20-40 words"
+        ..., description="Brief introduction, approximately 20-40 words"
     )
     segments: List[str] = Field(
         ...,
@@ -140,7 +140,7 @@ class PodcastScript(BaseModel):
         description="2 to 4 key points or paragraphs for the podcast body",
     )
     outro: str = Field(
-        ..., min_length=1, description="Brief conclusion, approximately 20-40 words"
+        ..., description="Brief conclusion, approximately 20-40 words"
     )
 
     @field_validator("segments")
