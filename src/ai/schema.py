@@ -133,10 +133,11 @@ class PodcastScript(BaseModel):
     intro: str = Field(
         ..., description="Brief introduction, approximately 20-40 words"
     )
+    # NOTE: Removed min_length and max_length from Field to avoid
+    # "minItems"/"maxItems" errors with the Gemini library.
+    # Validation is handled by the field_validator below.
     segments: List[str] = Field(
         ...,
-        min_length=2,
-        max_length=4,
         description="2 to 4 key points or paragraphs for the podcast body",
     )
     outro: str = Field(
